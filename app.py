@@ -12,7 +12,6 @@ from fastapi import FastAPI, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-
 app = FastAPI()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
