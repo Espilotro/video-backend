@@ -296,6 +296,7 @@ def get_video_transcript(body: TranscriptRequest):
 
 
 @app.post("/video/analyze")
+@app.post("/video/analyze")
 def analyze_video(body: AnalyzeRequest):
     validate_source(body)
     workdir = make_workdir()
@@ -324,5 +325,8 @@ def analyze_video(body: AnalyzeRequest):
             "frames": [],
             **analysis
         }
+    except Exception as e:
+        print(f"ERROR /video/analyze: {repr(e)}", flush=True)
+        raise
     finally:
         cleanup_dir(workdir)
