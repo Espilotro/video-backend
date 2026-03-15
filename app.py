@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -35,7 +35,7 @@ class AnalyzeRequest(VideoSourceRequest):
     frameCount: int = Field(default=4, ge=1, le=12)
 
 
-def validate_source(body):
+def validate_source(body: VideoSourceRequest):
     if not body.sourceUrl and not body.fileId:
         raise HTTPException(status_code=400, detail="Informe sourceUrl ou fileId")
 
@@ -57,19 +57,22 @@ def run_cmd(cmd: list[str]) -> str:
     except subprocess.CalledProcessError as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Erro ao executar comando: {' '.join(cmd)} | stderr={e.stderr[:700]}"
+            detail=f"Erro ao executar comando: {' '.join(cmd)} | stderr={e.stderr[:800]}"
         )
 
 
 def extract_drive_file_id(source_url: Optional[str], file_id: Optional[str]) -> str:
     if file_id:
         return file_id
+
     if not source_url:
         raise HTTPException(status_code=400, detail="Google Drive exige sourceUrl ou fileId")
+
     marker = "/file/d/"
     if marker in source_url:
         tail = source_url.split(marker, 1)[1]
         return tail.split("/", 1)[0]
+
     raise HTTPException(status_code=400, detail="Não consegui extrair o fileId do link do Google Drive")
 
 
@@ -90,6 +93,7 @@ def download_from_google_drive(source_url: Optional[str], file_id: Optional[str]
             response = session.get(f"{url}&confirm={confirm_token}", stream=True, timeout=120)
 
     response.raise_for_status()
+
     with open(dest, "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
@@ -126,7 +130,7 @@ def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
         if not body.sourceUrl:
             raise HTTPException(status_code=400, detail="directUrl exige sourceUrl")
 
-        # aceita caminho local caso a Action envie um path interno por engano
+        # aceita path local apenas se existir de verdade no ambiente do servidor
         if body.sourceUrl.startswith("/"):
             local_path = Path(body.sourceUrl)
             if not local_path.exists():
@@ -161,6 +165,7 @@ def ffprobe_metadata(video_path: Path) -> dict:
         "-show_streams",
         str(video_path),
     ])
+
     data = json.loads(output or "{}")
     fmt = data.get("format", {})
     duration = fmt.get("duration")
@@ -176,6 +181,7 @@ def ffprobe_metadata(video_path: Path) -> dict:
 
 def extract_audio(video_path: Path, workdir: Path) -> Path:
     audio_path = workdir / "audio.mp3"
+
     run_cmd([
         "ffmpeg",
         "-y",
@@ -186,8 +192,10 @@ def extract_audio(video_path: Path, workdir: Path) -> Path:
         "-ac", "1",
         str(audio_path),
     ])
+
     if not audio_path.exists():
         raise HTTPException(status_code=500, detail="Falha ao extrair áudio")
+
     return audio_path
 
 
@@ -251,6 +259,7 @@ def transcribe_audio(audio_path: Path, language: str) -> dict:
 
     segments = []
     raw_segments = getattr(transcript, "segments", None) or []
+
     for seg in raw_segments:
         start = getattr(seg, "start", 0)
         end = getattr(seg, "end", 0)
@@ -320,13 +329,14 @@ Transcrição:
 
 @app.get("/health")
 def health_check():
-    return {"ok": True, "service": "video-backend", "version": "2.2.0"}
+    return {"ok": True, "service": "video-backend", "version": "3.0.0"}
 
 
 @app.post("/video/metadata")
 def get_video_metadata(body: VideoSourceRequest):
     validate_source(body)
     workdir = make_workdir()
+
     try:
         video_path = resolve_video(body, workdir)
         metadata = ffprobe_metadata(video_path)
@@ -344,6 +354,7 @@ def get_video_metadata(body: VideoSourceRequest):
 def get_video_transcript(body: TranscriptRequest):
     validate_source(body)
     workdir = make_workdir()
+
     try:
         video_path = resolve_video(body, workdir)
         audio_path = extract_audio(video_path, workdir)
@@ -360,6 +371,7 @@ def get_video_transcript(body: TranscriptRequest):
 def analyze_video(body: AnalyzeRequest):
     validate_source(body)
     workdir = make_workdir()
+
     try:
         video_path = resolve_video(body, workdir)
         metadata = ffprobe_metadata(video_path)
@@ -372,6 +384,13 @@ def analyze_video(body: AnalyzeRequest):
         frames = []
         if body.includeFrames:
             frames = extract_frames(video_path, workdir, body.frameCount)
+
+        # regra editorial: sem frames, sem análise completa
+        if body.includeFrames and len(frames) == 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Não foi possível extrair frames suficientes para avaliação visual"
+            )
 
         analysis = analyze_transcript(
             transcript["fullText"] if transcript else "",
@@ -389,67 +408,9 @@ def analyze_video(body: AnalyzeRequest):
             "frames": frames,
             **analysis
         }
+
     except Exception as e:
         print(f"ERROR /video/analyze: {repr(e)}", flush=True)
-        raise
-    finally:
-        cleanup_dir(workdir)
-
-
-@app.post("/video/uploadAnalyze")
-async def upload_analyze(
-    videoFile: UploadFile = File(...),
-    language: str = Form("pt-BR"),
-    includeTranscript: bool = Form(True),
-    includeFrames: bool = Form(True),
-    frameCount: int = Form(4),
-    platform: str = Form(""),
-    reviewGoal: str = Form(""),
-    audience: str = Form(""),
-    notes: str = Form("")
-):
-    workdir = make_workdir()
-    try:
-        print(f"UPLOAD recebido: filename={videoFile.filename} content_type={videoFile.content_type}", flush=True)
-
-        safe_name = videoFile.filename or "upload.mp4"
-        video_path = workdir / safe_name
-
-        content = await videoFile.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Arquivo enviado está vazio")
-
-        with open(video_path, "wb") as f:
-            f.write(content)
-
-        metadata = ffprobe_metadata(video_path)
-
-        transcript = None
-        if includeTranscript:
-            audio_path = extract_audio(video_path, workdir)
-            transcript = transcribe_audio(audio_path, language)
-
-        frames = []
-        if includeFrames:
-            frames = extract_frames(video_path, workdir, frameCount)
-
-        analysis = analyze_transcript(
-            transcript["fullText"] if transcript else "",
-            language
-        )
-
-        return {
-            "title": metadata["title"],
-            "mimeType": metadata["mimeType"],
-            "durationSeconds": metadata["durationSeconds"],
-            "transcript": transcript,
-            "frames": frames,
-            **analysis
-        }
-    except Exception as e:
-        import traceback
-        print(f"ERROR /video/uploadAnalyze: {repr(e)}", flush=True)
-        traceback.print_exc()
         raise
     finally:
         cleanup_dir(workdir)
