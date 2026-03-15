@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -130,7 +131,6 @@ def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
         if not body.sourceUrl:
             raise HTTPException(status_code=400, detail="directUrl exige sourceUrl")
 
-        # aceita path local apenas se existir de verdade no ambiente do servidor
         if body.sourceUrl.startswith("/"):
             local_path = Path(body.sourceUrl)
             if not local_path.exists():
@@ -199,7 +199,7 @@ def extract_audio(video_path: Path, workdir: Path) -> Path:
     return audio_path
 
 
-def extract_frames(video_path: Path, workdir: Path, frame_count: int = 4) -> list[dict]:
+def extract_frame_files(video_path: Path, workdir: Path, frame_count: int = 4) -> list[dict]:
     output_dir = workdir / "frames"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -235,11 +235,92 @@ def extract_frames(video_path: Path, workdir: Path, frame_count: int = 4) -> lis
         if frame_path.exists():
             frames.append({
                 "timestampSeconds": sec,
-                "imageUrl": str(frame_path),
-                "description": f"Frame extraído no segundo {sec}"
+                "path": frame_path
             })
 
     return frames
+
+
+def image_to_data_url(image_path: Path) -> str:
+    mime = "image/jpeg"
+    encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    return f"data:{mime};base64,{encoded}"
+
+
+def describe_frames(frame_files: list[dict], language: str) -> list[dict]:
+    if not client:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY não configurada")
+
+    described = []
+
+    for item in frame_files:
+        frame_path: Path = item["path"]
+        timestamp = item["timestampSeconds"]
+
+        try:
+            image_data_url = image_to_data_url(frame_path)
+
+            response = client.responses.create(
+                model="gpt-4.1-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    f"Descreva este frame de vídeo culinário em {language}. "
+                                    "Seja objetiva e útil para análise editorial. "
+                                    "Diga o que aparece, se há prato, mão, rosto, texto na tela, "
+                                    "movimento sugerido, apetite visual, força da imagem e se parece abertura, meio ou fechamento. "
+                                    "Responda em JSON com as chaves: description, visualStrength, hasDish, hasHuman, hasTextOverlay, likelyMoment."
+                                )
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": image_data_url
+                            }
+                        ]
+                    }
+                ]
+            )
+
+            text = response.output_text.strip()
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                data = {
+                    "description": text,
+                    "visualStrength": "unknown",
+                    "hasDish": None,
+                    "hasHuman": None,
+                    "hasTextOverlay": None,
+                    "likelyMoment": "unknown"
+                }
+
+            described.append({
+                "timestampSeconds": timestamp,
+                "description": data.get("description", ""),
+                "visualStrength": data.get("visualStrength", "unknown"),
+                "hasDish": data.get("hasDish"),
+                "hasHuman": data.get("hasHuman"),
+                "hasTextOverlay": data.get("hasTextOverlay"),
+                "likelyMoment": data.get("likelyMoment", "unknown")
+            })
+
+        except Exception as e:
+            described.append({
+                "timestampSeconds": timestamp,
+                "description": f"Falha ao descrever frame: {str(e)}",
+                "visualStrength": "unknown",
+                "hasDish": None,
+                "hasHuman": None,
+                "hasTextOverlay": None,
+                "likelyMoment": "unknown"
+            })
+
+    return described
 
 
 def transcribe_audio(audio_path: Path, language: str) -> dict:
@@ -281,17 +362,28 @@ def transcribe_audio(audio_path: Path, language: str) -> dict:
     }
 
 
-def analyze_transcript(transcript_text: str, language: str) -> dict:
+def analyze_video_editorially(transcript_text: str, frames: list[dict], language: str) -> dict:
     if not client:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY não configurada")
 
+    frames_text = json.dumps(frames, ensure_ascii=False, indent=2)
+
     prompt = f"""
-Analise editorialmente a transcrição abaixo em {language}.
+Faça uma análise editorial de um vídeo curto de gastronomia em {language}.
+
+Você recebeu:
+1. a transcrição do vídeo
+2. descrições textuais dos frames
+
+Só faça análise completa se houver frames suficientes.
 Responda em JSON com as chaves:
 summary, strengths, risksBeforePublishing, improvements, suggestedTitle, suggestedDescription, suggestedHook.
 
 Transcrição:
 {transcript_text}
+
+Frames descritos:
+{frames_text}
 """
 
     try:
@@ -329,7 +421,7 @@ Transcrição:
 
 @app.get("/health")
 def health_check():
-    return {"ok": True, "service": "video-backend", "version": "3.0.0"}
+    return {"ok": True, "service": "video-backend", "version": "4.0.0"}
 
 
 @app.post("/video/metadata")
@@ -383,17 +475,18 @@ def analyze_video(body: AnalyzeRequest):
 
         frames = []
         if body.includeFrames:
-            frames = extract_frames(video_path, workdir, body.frameCount)
+            frame_files = extract_frame_files(video_path, workdir, body.frameCount)
+            frames = describe_frames(frame_files, body.language)
 
-        # regra editorial: sem frames, sem análise completa
         if body.includeFrames and len(frames) == 0:
             raise HTTPException(
                 status_code=422,
                 detail="Não foi possível extrair frames suficientes para avaliação visual"
             )
 
-        analysis = analyze_transcript(
+        analysis = analyze_video_editorially(
             transcript["fullText"] if transcript else "",
+            frames,
             body.language
         )
 
