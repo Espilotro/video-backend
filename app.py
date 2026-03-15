@@ -270,10 +270,19 @@ def describe_frames(frame_files: list[dict], language: str) -> list[dict]:
                                 "type": "input_text",
                                 "text": (
                                     f"Descreva este frame de vídeo culinário em {language}. "
-                                    "Seja objetiva e útil para análise editorial. "
-                                    "Diga o que aparece, se há prato, mão, rosto, texto na tela, "
-                                    "movimento sugerido, apetite visual, força da imagem e se parece abertura, meio ou fechamento. "
-                                    "Responda em JSON com as chaves: description, visualStrength, hasDish, hasHuman, hasTextOverlay, likelyMoment."
+                                    "Seja extremamente conservadora. "
+                                    "Descreva apenas o que estiver claramente visível. "
+                                    "Não adivinhe ingrediente exato. "
+                                    "Não afirme tipo exato de massa se não estiver totalmente evidente. "
+                                    "Não invente elementos ausentes. "
+                                    "Foque em estrutura editorial e força visual. "
+                                    "Responda em JSON com as chaves: "
+                                    "description, visualStrength, appetizing, hasDish, hasHuman, hasTextOverlay, likelyMoment, confidence. "
+                                    "Valores sugeridos: "
+                                    "visualStrength = high|medium|low|unknown, "
+                                    "appetizing = high|medium|low|unknown, "
+                                    "likelyMoment = opening|middle|closing|unknown, "
+                                    "confidence = high|medium|low."
                                 )
                             },
                             {
@@ -293,20 +302,24 @@ def describe_frames(frame_files: list[dict], language: str) -> list[dict]:
                 data = {
                     "description": text,
                     "visualStrength": "unknown",
+                    "appetizing": "unknown",
                     "hasDish": None,
                     "hasHuman": None,
                     "hasTextOverlay": None,
-                    "likelyMoment": "unknown"
+                    "likelyMoment": "unknown",
+                    "confidence": "low"
                 }
 
             described.append({
                 "timestampSeconds": timestamp,
                 "description": data.get("description", ""),
                 "visualStrength": data.get("visualStrength", "unknown"),
+                "appetizing": data.get("appetizing", "unknown"),
                 "hasDish": data.get("hasDish"),
                 "hasHuman": data.get("hasHuman"),
                 "hasTextOverlay": data.get("hasTextOverlay"),
-                "likelyMoment": data.get("likelyMoment", "unknown")
+                "likelyMoment": data.get("likelyMoment", "unknown"),
+                "confidence": data.get("confidence", "low")
             })
 
         except Exception as e:
@@ -314,10 +327,12 @@ def describe_frames(frame_files: list[dict], language: str) -> list[dict]:
                 "timestampSeconds": timestamp,
                 "description": f"Falha ao descrever frame: {str(e)}",
                 "visualStrength": "unknown",
+                "appetizing": "unknown",
                 "hasDish": None,
                 "hasHuman": None,
                 "hasTextOverlay": None,
-                "likelyMoment": "unknown"
+                "likelyMoment": "unknown",
+                "confidence": "low"
             })
 
     return described
@@ -362,6 +377,29 @@ def transcribe_audio(audio_path: Path, language: str) -> dict:
     }
 
 
+def summarize_frame_confidence(frames: list[dict]) -> dict:
+    if not frames:
+        return {
+            "usable": False,
+            "highConfidenceCount": 0,
+            "mediumConfidenceCount": 0,
+            "lowConfidenceCount": 0
+        }
+
+    high_count = sum(1 for f in frames if f.get("confidence") == "high")
+    medium_count = sum(1 for f in frames if f.get("confidence") == "medium")
+    low_count = sum(1 for f in frames if f.get("confidence") == "low")
+
+    usable = (high_count + medium_count) >= max(1, len(frames) // 2)
+
+    return {
+        "usable": usable,
+        "highConfidenceCount": high_count,
+        "mediumConfidenceCount": medium_count,
+        "lowConfidenceCount": low_count
+    }
+
+
 def analyze_video_editorially(transcript_text: str, frames: list[dict], language: str) -> dict:
     if not client:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY não configurada")
@@ -373,9 +411,24 @@ Faça uma análise editorial de um vídeo curto de gastronomia em {language}.
 
 Você recebeu:
 1. a transcrição do vídeo
-2. descrições textuais dos frames
+2. descrições textuais de frames
 
-Só faça análise completa se houver frames suficientes.
+Use os frames apenas para avaliar:
+- abertura visual
+- presença de prato
+- presença humana
+- texto na tela
+- força visual geral
+- apetite visual
+- estrutura de começo, meio e fim
+
+Não use frames para afirmar:
+- ingrediente exato
+- tipo exato de massa
+- composição culinária detalhada
+
+Se houver incerteza visual, trate como incerteza.
+
 Responda em JSON com as chaves:
 summary, strengths, risksBeforePublishing, improvements, suggestedTitle, suggestedDescription, suggestedHook.
 
@@ -421,7 +474,7 @@ Frames descritos:
 
 @app.get("/health")
 def health_check():
-    return {"ok": True, "service": "video-backend", "version": "4.0.0"}
+    return {"ok": True, "service": "video-backend", "version": "4.1.0"}
 
 
 @app.post("/video/metadata")
@@ -484,6 +537,14 @@ def analyze_video(body: AnalyzeRequest):
                 detail="Não foi possível extrair frames suficientes para avaliação visual"
             )
 
+        confidence_summary = summarize_frame_confidence(frames)
+
+        if body.includeFrames and not confidence_summary["usable"]:
+            raise HTTPException(
+                status_code=422,
+                detail="Frames extraídos com baixa confiabilidade para avaliação visual completa"
+            )
+
         analysis = analyze_video_editorially(
             transcript["fullText"] if transcript else "",
             frames,
@@ -499,6 +560,7 @@ def analyze_video(body: AnalyzeRequest):
             "durationSeconds": metadata["durationSeconds"],
             "transcript": transcript,
             "frames": frames,
+            "frameConfidence": confidence_summary,
             **analysis
         }
 
