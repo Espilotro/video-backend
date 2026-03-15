@@ -126,11 +126,14 @@ def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
         if not body.sourceUrl:
             raise HTTPException(status_code=400, detail="directUrl exige sourceUrl")
 
-        # novo: aceitar caminho local de arquivo
+        # aceita arquivo local anexado pelo chat
         if body.sourceUrl.startswith("/"):
             local_path = Path(body.sourceUrl)
             if not local_path.exists():
-                raise HTTPException(status_code=400, detail=f"Arquivo local não encontrado: {body.sourceUrl}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Arquivo local não encontrado: {body.sourceUrl}"
+                )
             shutil.copy(local_path, video_path)
         else:
             download_direct_url(body.sourceUrl, video_path)
@@ -274,7 +277,7 @@ Transcrição:
 
 @app.get("/health")
 def health_check():
-    return {"ok": True, "service": "video-backend", "version": "2.0.0"}
+    return {"ok": True, "service": "video-backend", "version": "2.1.0"}
 
 
 @app.post("/video/metadata")
@@ -360,21 +363,35 @@ async def upload_analyze(
 ):
     workdir = make_workdir()
     try:
-        video_path = workdir / videoFile.filename
+        print(f"UPLOAD recebido: filename={videoFile.filename} content_type={videoFile.content_type}", flush=True)
+
+        safe_name = videoFile.filename or "upload.mp4"
+        video_path = workdir / safe_name
+
+        content = await videoFile.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Arquivo enviado está vazio")
+
         with open(video_path, "wb") as f:
-            f.write(await videoFile.read())
+            f.write(content)
+
+        print(f"Arquivo salvo em: {video_path} | bytes={len(content)}", flush=True)
 
         metadata = ffprobe_metadata(video_path)
+        print(f"Metadados extraídos: {metadata}", flush=True)
 
         transcript = None
         if includeTranscript:
             audio_path = extract_audio(video_path, workdir)
+            print(f"Áudio extraído em: {audio_path}", flush=True)
             transcript = transcribe_audio(audio_path, language)
+            print("Transcrição concluída", flush=True)
 
         analysis = analyze_transcript(
             transcript["fullText"] if transcript else "",
             language
         )
+        print("Análise concluída", flush=True)
 
         return {
             "title": metadata["title"],
@@ -385,7 +402,9 @@ async def upload_analyze(
             **analysis
         }
     except Exception as e:
+        import traceback
         print(f"ERROR /video/uploadAnalyze: {repr(e)}", flush=True)
+        traceback.print_exc()
         raise
     finally:
         cleanup_dir(workdir)
