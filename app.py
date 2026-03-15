@@ -12,6 +12,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+app = FastAPI()
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -281,7 +283,6 @@ def get_video_metadata(body: VideoSourceRequest):
 
 
 @app.post("/video/transcript")
-@app.post("/video/transcript")
 def get_video_transcript(body: TranscriptRequest):
     validate_source(body)
     workdir = make_workdir()
@@ -296,7 +297,7 @@ def get_video_transcript(body: TranscriptRequest):
     finally:
         cleanup_dir(workdir)
 
-@app.post("/video/analyze")
+
 @app.post("/video/analyze")
 def analyze_video(body: AnalyzeRequest):
     validate_source(body)
@@ -331,50 +332,9 @@ def analyze_video(body: AnalyzeRequest):
         raise
     finally:
         cleanup_dir(workdir)
-        @app.post("/video/uploadAnalyze")
-async def upload_analyze(
-    videoFile: UploadFile = File(...),
-    language: str = Form("pt-BR"),
-    includeTranscript: bool = Form(True),
-    includeFrames: bool = Form(False),
-    frameCount: int = Form(4),
-    platform: str = Form(""),
-    reviewGoal: str = Form(""),
-    audience: str = Form(""),
-    notes: str = Form("")
-):
-    workdir = make_workdir()
-    try:
-        video_path = workdir / videoFile.filename
-        with open(video_path, "wb") as f:
-            f.write(await videoFile.read())
 
-        metadata = ffprobe_metadata(video_path)
 
-        transcript = None
-        if includeTranscript:
-            audio_path = extract_audio(video_path, workdir)
-            transcript = transcribe_audio(audio_path, language)
-
-        analysis = analyze_transcript(
-            transcript["fullText"] if transcript else "",
-            language
-        )
-
-        return {
-            "title": metadata["title"],
-            "mimeType": metadata["mimeType"],
-            "durationSeconds": metadata["durationSeconds"],
-            "transcript": transcript,
-            "frames": [],
-            **analysis
-        }
-    except Exception as e:
-        print(f"ERROR /video/uploadAnalyze: {repr(e)}", flush=True)
-        raise
-    finally:
-        cleanup_dir(workdir)
-       @app.post("/video/uploadAnalyze")
+@app.post("/video/uploadAnalyze")
 async def upload_analyze(
     videoFile: UploadFile = File(...),
     language: str = Form("pt-BR"),
