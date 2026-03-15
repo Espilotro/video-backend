@@ -8,11 +8,9 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-app = FastAPI()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
