@@ -31,7 +31,7 @@ class TranscriptRequest(VideoSourceRequest):
 class AnalyzeRequest(VideoSourceRequest):
     language: str = "pt-BR"
     includeTranscript: bool = True
-    includeFrames: bool = False
+    includeFrames: bool = True
     frameCount: int = Field(default=4, ge=1, le=12)
 
 
@@ -57,7 +57,7 @@ def run_cmd(cmd: list[str]) -> str:
     except subprocess.CalledProcessError as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Erro ao executar comando: {' '.join(cmd)} | stderr={e.stderr[:500]}"
+            detail=f"Erro ao executar comando: {' '.join(cmd)} | stderr={e.stderr[:700]}"
         )
 
 
@@ -126,7 +126,7 @@ def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
         if not body.sourceUrl:
             raise HTTPException(status_code=400, detail="directUrl exige sourceUrl")
 
-        # aceita arquivo local anexado pelo chat
+        # aceita caminho local caso a Action envie um path interno por engano
         if body.sourceUrl.startswith("/"):
             local_path = Path(body.sourceUrl)
             if not local_path.exists():
@@ -189,6 +189,49 @@ def extract_audio(video_path: Path, workdir: Path) -> Path:
     if not audio_path.exists():
         raise HTTPException(status_code=500, detail="Falha ao extrair áudio")
     return audio_path
+
+
+def extract_frames(video_path: Path, workdir: Path, frame_count: int = 4) -> list[dict]:
+    output_dir = workdir / "frames"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata = ffprobe_metadata(video_path)
+    duration = metadata.get("durationSeconds") or 0
+    if duration <= 0:
+        return []
+
+    if frame_count <= 1:
+        points = [max(1, duration // 2)]
+    else:
+        step = max(1, duration // (frame_count + 1))
+        points = [step * (i + 1) for i in range(frame_count)]
+
+    frames = []
+
+    for idx, sec in enumerate(points, start=1):
+        frame_path = output_dir / f"frame_{idx}.jpg"
+
+        try:
+            run_cmd([
+                "ffmpeg",
+                "-y",
+                "-ss", str(sec),
+                "-i", str(video_path),
+                "-frames:v", "1",
+                "-q:v", "2",
+                str(frame_path),
+            ])
+        except HTTPException:
+            continue
+
+        if frame_path.exists():
+            frames.append({
+                "timestampSeconds": sec,
+                "imageUrl": str(frame_path),
+                "description": f"Frame extraído no segundo {sec}"
+            })
+
+    return frames
 
 
 def transcribe_audio(audio_path: Path, language: str) -> dict:
@@ -277,7 +320,7 @@ Transcrição:
 
 @app.get("/health")
 def health_check():
-    return {"ok": True, "service": "video-backend", "version": "2.1.0"}
+    return {"ok": True, "service": "video-backend", "version": "2.2.0"}
 
 
 @app.post("/video/metadata")
@@ -326,6 +369,10 @@ def analyze_video(body: AnalyzeRequest):
             audio_path = extract_audio(video_path, workdir)
             transcript = transcribe_audio(audio_path, body.language)
 
+        frames = []
+        if body.includeFrames:
+            frames = extract_frames(video_path, workdir, body.frameCount)
+
         analysis = analyze_transcript(
             transcript["fullText"] if transcript else "",
             body.language
@@ -339,7 +386,7 @@ def analyze_video(body: AnalyzeRequest):
             "mimeType": metadata["mimeType"],
             "durationSeconds": metadata["durationSeconds"],
             "transcript": transcript,
-            "frames": [],
+            "frames": frames,
             **analysis
         }
     except Exception as e:
@@ -354,7 +401,7 @@ async def upload_analyze(
     videoFile: UploadFile = File(...),
     language: str = Form("pt-BR"),
     includeTranscript: bool = Form(True),
-    includeFrames: bool = Form(False),
+    includeFrames: bool = Form(True),
     frameCount: int = Form(4),
     platform: str = Form(""),
     reviewGoal: str = Form(""),
@@ -375,30 +422,28 @@ async def upload_analyze(
         with open(video_path, "wb") as f:
             f.write(content)
 
-        print(f"Arquivo salvo em: {video_path} | bytes={len(content)}", flush=True)
-
         metadata = ffprobe_metadata(video_path)
-        print(f"Metadados extraídos: {metadata}", flush=True)
 
         transcript = None
         if includeTranscript:
             audio_path = extract_audio(video_path, workdir)
-            print(f"Áudio extraído em: {audio_path}", flush=True)
             transcript = transcribe_audio(audio_path, language)
-            print("Transcrição concluída", flush=True)
+
+        frames = []
+        if includeFrames:
+            frames = extract_frames(video_path, workdir, frameCount)
 
         analysis = analyze_transcript(
             transcript["fullText"] if transcript else "",
             language
         )
-        print("Análise concluída", flush=True)
 
         return {
             "title": metadata["title"],
             "mimeType": metadata["mimeType"],
             "durationSeconds": metadata["durationSeconds"],
             "transcript": transcript,
-            "frames": [],
+            "frames": frames,
             **analysis
         }
     except Exception as e:
