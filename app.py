@@ -233,7 +233,7 @@ def extract_audio(video_path: Path, workdir: Path) -> Path:
     return audio_path
 
 
-def extract_frame_files(video_path: Path, workdir: Path, frame_count: int = 4) -> list[dict]:
+def extract_frame_files(video_path: Path, workdir: Path, frame_count: int = 6) -> list[dict]:
     output_dir = workdir / "frames"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -242,15 +242,33 @@ def extract_frame_files(video_path: Path, workdir: Path, frame_count: int = 4) -
     if duration <= 0:
         return []
 
-    if frame_count <= 1:
-        points = [max(1, duration // 2)]
-    else:
+    # prioriza abertura, meio e fechamento
+    points = set()
+
+    # primeiros segundos
+    points.add(1)
+    if duration >= 2:
+        points.add(2)
+
+    # meio
+    points.add(max(1, duration // 2))
+
+    # final
+    if duration >= 3:
+        points.add(max(1, duration - 2))
+    points.add(max(1, duration - 1))
+
+    # completa com intervalos regulares
+    if frame_count > len(points):
         step = max(1, duration // (frame_count + 1))
-        points = [step * (i + 1) for i in range(frame_count)]
+        for i in range(frame_count):
+            points.add(max(1, step * (i + 1)))
+
+    ordered_points = sorted(p for p in points if p <= max(1, duration))[:frame_count]
 
     frames = []
 
-    for idx, sec in enumerate(points, start=1):
+    for idx, sec in enumerate(ordered_points, start=1):
         frame_path = output_dir / f"frame_{idx}.jpg"
 
         try:
