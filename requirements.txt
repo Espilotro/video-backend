@@ -1,2 +1,6 @@
 fastapi
 uvicorn
+requests
+openai
+python-multipart
+yt-dlp
