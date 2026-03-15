@@ -377,3 +377,46 @@ async def upload_analyze(
         raise
     finally:
         cleanup_dir(workdir)
+       @app.post("/video/uploadAnalyze")
+async def upload_analyze(
+    videoFile: UploadFile = File(...),
+    language: str = Form("pt-BR"),
+    includeTranscript: bool = Form(True),
+    includeFrames: bool = Form(False),
+    frameCount: int = Form(4),
+    platform: str = Form(""),
+    reviewGoal: str = Form(""),
+    audience: str = Form(""),
+    notes: str = Form("")
+):
+    workdir = make_workdir()
+    try:
+        video_path = workdir / videoFile.filename
+        with open(video_path, "wb") as f:
+            f.write(await videoFile.read())
+
+        metadata = ffprobe_metadata(video_path)
+
+        transcript = None
+        if includeTranscript:
+            audio_path = extract_audio(video_path, workdir)
+            transcript = transcribe_audio(audio_path, language)
+
+        analysis = analyze_transcript(
+            transcript["fullText"] if transcript else "",
+            language
+        )
+
+        return {
+            "title": metadata["title"],
+            "mimeType": metadata["mimeType"],
+            "durationSeconds": metadata["durationSeconds"],
+            "transcript": transcript,
+            "frames": [],
+            **analysis
+        }
+    except Exception as e:
+        print(f"ERROR /video/uploadAnalyze: {repr(e)}", flush=True)
+        raise
+    finally:
+        cleanup_dir(workdir)
