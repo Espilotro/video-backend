@@ -121,19 +121,31 @@ def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
 
     if body.sourceType == "googleDrive":
         download_from_google_drive(body.sourceUrl, body.fileId, video_path)
+
     elif body.sourceType == "directUrl":
         if not body.sourceUrl:
             raise HTTPException(status_code=400, detail="directUrl exige sourceUrl")
-        download_direct_url(body.sourceUrl, video_path)
+
+        # novo: aceitar caminho local de arquivo
+        if body.sourceUrl.startswith("/"):
+            local_path = Path(body.sourceUrl)
+            if not local_path.exists():
+                raise HTTPException(status_code=400, detail=f"Arquivo local não encontrado: {body.sourceUrl}")
+            shutil.copy(local_path, video_path)
+        else:
+            download_direct_url(body.sourceUrl, video_path)
+
     elif body.sourceType == "youtube":
         if not body.sourceUrl:
             raise HTTPException(status_code=400, detail="youtube exige sourceUrl")
         download_youtube(body.sourceUrl, video_path)
+
     else:
         raise HTTPException(status_code=400, detail="sourceType inválido")
 
     if not video_path.exists():
         raise HTTPException(status_code=500, detail="Falha ao obter vídeo")
+
     return video_path
 
 
