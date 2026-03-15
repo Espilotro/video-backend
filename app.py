@@ -33,8 +33,7 @@ class AnalyzeRequest(VideoSourceRequest):
     language: str = "pt-BR"
     includeTranscript: bool = True
     includeFrames: bool = True
-    frameCount: int = Field(default=4, ge=1, le=12)
-
+    frameCount: int = Field(default=6, ge=1, le=12)
 
 def validate_source(body: VideoSourceRequest):
     if not body.sourceUrl and not body.fileId:
