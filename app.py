@@ -77,6 +77,24 @@ def extract_drive_file_id(source_url: Optional[str], file_id: Optional[str]) -> 
     raise HTTPException(status_code=400, detail="Não consegui extrair o fileId do link do Google Drive")
 
 
+def validate_downloaded_video(dest: Path):
+    if not dest.exists():
+        raise HTTPException(status_code=500, detail="Arquivo de vídeo não foi baixado")
+
+    size = dest.stat().st_size
+    if size == 0:
+        raise HTTPException(status_code=500, detail="Arquivo baixado está vazio")
+
+    header = dest.read_bytes()[:512]
+
+    # Se o download veio como HTML, o Drive não entregou o vídeo real
+    if b"<html" in header.lower() or b"<!doctype html" in header.lower():
+        raise HTTPException(
+            status_code=500,
+            detail="Google Drive devolveu HTML em vez do arquivo de vídeo. Verifique compartilhamento/permissão."
+        )
+
+
 def download_from_google_drive(source_url: Optional[str], file_id: Optional[str], dest: Path) -> None:
     drive_file_id = extract_drive_file_id(source_url, file_id)
     url = f"https://drive.google.com/uc?export=download&id={drive_file_id}"
@@ -84,12 +102,15 @@ def download_from_google_drive(source_url: Optional[str], file_id: Optional[str]
     session = requests.Session()
     response = session.get(url, stream=True, timeout=120)
 
-    if "text/html" in response.headers.get("Content-Type", ""):
+    content_type = response.headers.get("Content-Type", "")
+
+    if "text/html" in content_type:
         confirm_token = None
         for cookie_name, cookie_value in response.cookies.items():
             if cookie_name.startswith("download_warning"):
                 confirm_token = cookie_value
                 break
+
         if confirm_token:
             response = session.get(f"{url}&confirm={confirm_token}", stream=True, timeout=120)
 
@@ -100,6 +121,8 @@ def download_from_google_drive(source_url: Optional[str], file_id: Optional[str]
             if chunk:
                 f.write(chunk)
 
+    validate_downloaded_video(dest)
+
 
 def download_direct_url(source_url: str, dest: Path) -> None:
     with requests.get(source_url, stream=True, timeout=120) as response:
@@ -108,6 +131,8 @@ def download_direct_url(source_url: str, dest: Path) -> None:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
+
+    validate_downloaded_video(dest)
 
 
 def download_youtube(source_url: str, dest: Path) -> None:
@@ -119,6 +144,8 @@ def download_youtube(source_url: str, dest: Path) -> None:
         if not candidates:
             raise HTTPException(status_code=500, detail="Falha ao baixar vídeo do YouTube")
         candidates[0].rename(dest)
+
+    validate_downloaded_video(dest)
 
 
 def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
@@ -134,11 +161,9 @@ def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
         if body.sourceUrl.startswith("/"):
             local_path = Path(body.sourceUrl)
             if not local_path.exists():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Arquivo local não encontrado: {body.sourceUrl}"
-                )
+                raise HTTPException(status_code=400, detail=f"Arquivo local não encontrado: {body.sourceUrl}")
             shutil.copy(local_path, video_path)
+            validate_downloaded_video(video_path)
         else:
             download_direct_url(body.sourceUrl, video_path)
 
@@ -150,21 +175,24 @@ def resolve_video(body: VideoSourceRequest, workdir: Path) -> Path:
     else:
         raise HTTPException(status_code=400, detail="sourceType inválido")
 
-    if not video_path.exists():
-        raise HTTPException(status_code=500, detail="Falha ao obter vídeo")
-
     return video_path
 
 
 def ffprobe_metadata(video_path: Path) -> dict:
-    output = run_cmd([
-        "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        str(video_path),
-    ])
+    try:
+        output = run_cmd([
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            str(video_path),
+        ])
+    except HTTPException:
+        raise HTTPException(
+            status_code=500,
+            detail="ffprobe não conseguiu ler o MP4. O arquivo pode estar corrompido ou o download do Drive não entregou um vídeo válido."
+        )
 
     data = json.loads(output or "{}")
     fmt = data.get("format", {})
@@ -182,16 +210,22 @@ def ffprobe_metadata(video_path: Path) -> dict:
 def extract_audio(video_path: Path, workdir: Path) -> Path:
     audio_path = workdir / "audio.mp3"
 
-    run_cmd([
-        "ffmpeg",
-        "-y",
-        "-i", str(video_path),
-        "-vn",
-        "-acodec", "libmp3lame",
-        "-ar", "16000",
-        "-ac", "1",
-        str(audio_path),
-    ])
+    try:
+        run_cmd([
+            "ffmpeg",
+            "-y",
+            "-i", str(video_path),
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-ar", "16000",
+            "-ac", "1",
+            str(audio_path),
+        ])
+    except HTTPException:
+        raise HTTPException(
+            status_code=500,
+            detail="ffmpeg não conseguiu extrair áudio do vídeo"
+        )
 
     if not audio_path.exists():
         raise HTTPException(status_code=500, detail="Falha ao extrair áudio")
@@ -274,15 +308,9 @@ def describe_frames(frame_files: list[dict], language: str) -> list[dict]:
                                     "Descreva apenas o que estiver claramente visível. "
                                     "Não adivinhe ingrediente exato. "
                                     "Não afirme tipo exato de massa se não estiver totalmente evidente. "
-                                    "Não invente elementos ausentes. "
                                     "Foque em estrutura editorial e força visual. "
                                     "Responda em JSON com as chaves: "
-                                    "description, visualStrength, appetizing, hasDish, hasHuman, hasTextOverlay, likelyMoment, confidence. "
-                                    "Valores sugeridos: "
-                                    "visualStrength = high|medium|low|unknown, "
-                                    "appetizing = high|medium|low|unknown, "
-                                    "likelyMoment = opening|middle|closing|unknown, "
-                                    "confidence = high|medium|low."
+                                    "description, visualStrength, appetizing, hasDish, hasHuman, hasTextOverlay, likelyMoment, confidence."
                                 )
                             },
                             {
@@ -409,10 +437,6 @@ def analyze_video_editorially(transcript_text: str, frames: list[dict], language
     prompt = f"""
 Faça uma análise editorial de um vídeo curto de gastronomia em {language}.
 
-Você recebeu:
-1. a transcrição do vídeo
-2. descrições textuais de frames
-
 Use os frames apenas para avaliar:
 - abertura visual
 - presença de prato
@@ -426,8 +450,6 @@ Não use frames para afirmar:
 - ingrediente exato
 - tipo exato de massa
 - composição culinária detalhada
-
-Se houver incerteza visual, trate como incerteza.
 
 Responda em JSON com as chaves:
 summary, strengths, risksBeforePublishing, improvements, suggestedTitle, suggestedDescription, suggestedHook.
@@ -474,7 +496,7 @@ Frames descritos:
 
 @app.get("/health")
 def health_check():
-    return {"ok": True, "service": "video-backend", "version": "4.1.0"}
+    return {"ok": True, "service": "video-backend", "version": "4.2.0"}
 
 
 @app.post("/video/metadata")
@@ -491,6 +513,9 @@ def get_video_metadata(body: VideoSourceRequest):
             "fileId": body.fileId,
             **metadata
         }
+    except Exception as e:
+        print(f"ERROR /video/metadata: {repr(e)}", flush=True)
+        raise
     finally:
         cleanup_dir(workdir)
 
