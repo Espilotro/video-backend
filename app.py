@@ -283,6 +283,7 @@ def get_video_metadata(body: VideoSourceRequest):
 
 
 @app.post("/video/transcript")
+@app.post("/video/transcript")
 def get_video_transcript(body: TranscriptRequest):
     validate_source(body)
     workdir = make_workdir()
@@ -291,9 +292,11 @@ def get_video_transcript(body: TranscriptRequest):
         audio_path = extract_audio(video_path, workdir)
         transcript = transcribe_audio(audio_path, body.language)
         return {"transcript": transcript}
+    except Exception as e:
+        print(f"ERROR /video/transcript: {repr(e)}", flush=True)
+        raise
     finally:
         cleanup_dir(workdir)
-
 
 @app.post("/video/analyze")
 @app.post("/video/analyze")
