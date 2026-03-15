@@ -180,13 +180,16 @@ def transcribe_audio(audio_path: Path, language: str) -> dict:
     if not client:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY não configurada")
 
-    with open(audio_path, "rb") as audio_file:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            language=language.split("-")[0] if language else "pt",
-            response_format="verbose_json"
-        )
+    try:
+        with open(audio_path, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language=language.split("-")[0] if language else "pt",
+                response_format="verbose_json"
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro na transcrição: {str(e)}")
 
     segments = []
     raw_segments = getattr(transcript, "segments", None) or []
@@ -224,12 +227,14 @@ Transcrição:
 {transcript_text}
 """
 
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=prompt
-    )
-
-    text = response.output_text.strip()
+    try:
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=prompt
+        )
+        text = response.output_text.strip()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro na análise: {str(e)}")
 
     try:
         data = json.loads(text)
